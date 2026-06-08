@@ -56,8 +56,6 @@ class GeneratorWrapper:
     def load(
             cls,
             checkpoint_path: str,
-            use_last_action: bool,
-            use_target: bool,
             device: str = "cuda",
             ) -> "GeneratorWrapper":
 
@@ -72,6 +70,8 @@ class GeneratorWrapper:
             payload = torch.load(f, pickle_module=dill, map_location='cpu')
         
         cfg = payload['cfg']
+        use_target = cfg.use_target
+        use_last_action = cfg.use_last_action
         OmegaConf.resolve(cfg)
         
         # Extract policy config

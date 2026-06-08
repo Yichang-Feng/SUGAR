@@ -350,8 +350,6 @@ class MotionCommand(CommandTerm):
         print(f"[Generator] Initializing Generator...")
         self.generator = GeneratorWrapper.load(
             checkpoint_path=self.cfg.generator_checkpoint_path,
-            use_last_action=self.cfg.generator_use_last_action,
-            use_target=self.cfg.generator_use_target,
             device=self.device,
         )
         print(f"[Generator] Generator initialized successfully!")
@@ -1773,8 +1771,6 @@ class MotionCommandCfg(CommandTermCfg):
     use_generator: bool = MISSING  
     generator_checkpoint_path: str = MISSING  
     generator_call_interval: int = None,
-    generator_use_target: bool = None,
-    generator_use_last_action: bool = None,
 
     pool_warmup_steps: int = MISSING
     start_init_env_ratio: float = MISSING

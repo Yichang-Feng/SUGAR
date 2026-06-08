@@ -193,9 +193,7 @@ class BaseCommandsCfg:
         future_frames=8,
         start_init_env_ratio=1.0,
         pool_warmup_steps=10000000*24,
-        init_with_ref=False,
-        generator_use_target=True,
-        generator_use_last_action=True
+        init_with_ref=False
     )
 
 
