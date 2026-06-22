@@ -122,7 +122,7 @@ class BaseRobotSceneCfg(InteractiveSceneCfg):
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Obj"], 
         )
     pelvis_forces = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/pelvis_contour_link", 
+            prim_path="{ENV_REGEX_NS}/Robot/pelvis", 
             history_length=3, 
             track_air_time=True, 
             force_threshold=0.1,
