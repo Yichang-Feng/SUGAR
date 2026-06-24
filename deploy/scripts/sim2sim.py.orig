@@ -251,7 +251,6 @@ def load_reference_motion(task, motion_id):
     
     ref_data = {
         "joint_pos": joint_pos_urdf,
-        "joint_pos_urdf": robot_data["joint_pos"][:num_frames],
         "joint_vel": joint_vel_urdf,
         "robot_body_pos_w": robot_data["body_pos_w"][:num_frames],
         "robot_body_quat_w": robot_data["body_quat_w"][:num_frames],
@@ -386,7 +385,7 @@ def main():
 
     # Get initial values
     R_pelvis = data.xmat[pelvis_body_id].reshape(3, 3)
-    initial_base_ang_vel = data.qvel[3:6].copy()
+    initial_base_ang_vel = R_pelvis.T @ data.qvel[3:6].copy()
     
     q_actual = np.array([data.qpos[adr] for adr in joint_qpos_indices])
     v_actual = np.array([data.qvel[adr] for adr in joint_qvel_indices])
@@ -394,17 +393,12 @@ def main():
     initial_joint_vel = v_actual
     initial_project_gravity = R_pelvis.T @ np.array([0, 0, -1.0])
 
-    initial_action_regex = np.zeros(29)
-    for i, name in enumerate(ACTION_JOINT_NAMES):
-        alpha_idx = JOINT_NAMES_29.index(name)
-        initial_action_regex[i] = initial_joint_pos_rel[alpha_idx] / action_scale_array[alpha_idx]
-
     # Fill History queues
     for _ in range(5):
         base_ang_vel_hist.append(initial_base_ang_vel)
         joint_pos_rel_hist.append(initial_joint_pos_rel)
         joint_vel_hist.append(initial_joint_vel)
-        actions_hist.append(initial_action_regex.copy())
+        actions_hist.append(np.zeros(29))
         project_gravity_hist.append(initial_project_gravity)
 
     # High-level command sequence buffer
@@ -475,7 +469,7 @@ def main():
         
         # 1. Update State Variables
         R_pelvis = data.xmat[pelvis_body_id].reshape(3, 3)
-        curr_base_ang_vel = data.qvel[3:6].copy()
+        curr_base_ang_vel = R_pelvis.T @ data.qvel[3:6].copy()
         
         q_actual = np.array([data.qpos[adr] for adr in joint_qpos_indices])
         v_actual = np.array([data.qvel[adr] for adr in joint_qvel_indices])
@@ -488,11 +482,11 @@ def main():
         p_torso = data.xpos[torso_body_id]
         R_torso = data.xmat[torso_body_id].reshape(3, 3)
         
-        obj_pos_b = R_torso.T @ (p_obj - p_torso)
+        curr_obj_pos_b = R_torso.T @ (p_obj - p_torso)
         
         R_obj = data.xmat[box_body_id].reshape(3, 3)
         R_obj_torso = R_torso.T @ R_obj
-        obj_ori_b = R_obj_torso[:, :2].flatten() # first 2 columns (6 elements)
+        curr_obj_ori_b = R_obj_torso[:, :2].flatten() # first 2 columns (6 elements)
 
         # 2. Update Tracker History queues
         base_ang_vel_hist.pop(0)
@@ -508,16 +502,16 @@ def main():
         project_gravity_hist.append(curr_project_gravity)
         
         # Assemble observation arrays (oldest to newest)
-        base_ang_vel_history = np.concatenate(base_ang_vel_hist)
-        joint_pos_history = np.concatenate(joint_pos_rel_hist)
-        joint_vel_history = np.concatenate(joint_vel_hist)
-        actions_history = np.concatenate(actions_hist)
-        project_gravity = np.concatenate(project_gravity_hist)
+        base_ang_vel_obs = np.concatenate(base_ang_vel_hist)
+        joint_pos_rel_obs = np.concatenate(joint_pos_rel_hist)
+        joint_vel_obs = np.concatenate(joint_vel_hist)
+        actions_obs = np.concatenate(actions_hist)
+        project_gravity_obs = np.concatenate(project_gravity_hist)
 
         # 3. Retrieve or Predict Command (36 dims)
         if args.mode == "tracker":
             # Tracker mode uses direct values from dataset
-            ref_joint_pos_frame = ref_data["joint_pos_urdf"][frame_idx]
+            ref_joint_pos_frame = ref_data["joint_pos"][frame_idx]
             
             # Get reference base orientation
             q_ref_base = ref_data["robot_body_quat_w"][frame_idx, 0]
@@ -527,7 +521,7 @@ def main():
             
             ref_contact_label_frame = np.array([ref_data["contact_label"][frame_idx]], dtype=float)
             
-            generated_command = np.concatenate([
+            ref_command = np.concatenate([
                 ref_joint_pos_frame,
                 ref_root_lin_vel_b_frame,
                 ref_root_ang_vel_b_frame,
@@ -563,23 +557,23 @@ def main():
             # Retrieve command for current step in interval
             step_in_interval = frame_idx % gen_call_interval
             gen_cmd = gen_preds[step_in_interval]
-            generated_command = gen_cmd
+            ref_command = gen_cmd
 
         # 4. Assemble Full 510-dim Tracker Observation
         tracker_obs = np.concatenate([
-            generated_command,      # 36 dims
-            base_ang_vel_history,   # 15 dims
-            joint_pos_history,      # 145 dims
-            joint_vel_history,      # 145 dims
-            actions_history,        # 145 dims
-            project_gravity,        # 15 dims
-            obj_pos_b,              # 3 dims
-            obj_ori_b               # 6 dims
+            ref_command,            # 36 dims
+            base_ang_vel_obs,       # 15 dims
+            joint_pos_rel_obs,      # 145 dims
+            joint_vel_obs,          # 145 dims
+            actions_obs,            # 145 dims
+            project_gravity_obs,    # 15 dims
+            curr_obj_pos_b,         # 3 dims
+            curr_obj_ori_b          # 6 dims
         ])
         
         # 5. Policy Inference to get normalized action [-1, 1]
         action = tracker_policy(tracker_obs)
-        action = np.clip(action, -5, 5)
+        action = np.clip(action, -1.0, 1.0)
         
         # 6. PD Joint Control & MuJoCo Stepping
         # The network outputs action in REGEX order. We map it back to URDF order for MuJoCo control.
@@ -625,22 +619,6 @@ def main():
             with open("sim2sim_diagnostics.log", "w") as f:
                 f.write("--- FRAME 0 DIAGNOSTICS ---\n")
                 f.write(json.dumps(diag_log, indent=2))
-                
-                f.write("\n\n--- FRAME 0 TRACKER OBSERVATION DIAGNOSTICS ---\n")
-                obs_diag = {
-                    "tracker_obs_shape": tracker_obs.shape,
-                    "components": {
-                        "generated_command": generated_command.tolist(),
-                        "base_ang_vel_history": base_ang_vel_history.tolist(),
-                        "joint_pos_history": joint_pos_history.tolist(),
-                        "joint_vel_history": joint_vel_history.tolist(),
-                        "actions_history": actions_history.tolist(),
-                        "project_gravity": project_gravity.tolist(),
-                        "obj_pos_b": obj_pos_b.tolist(),
-                        "obj_ori_b": obj_ori_b.tolist()
-                    }
-                }
-                f.write(json.dumps(obs_diag, indent=2))
             
             print("--- FRAME 0 DIAGNOSTICS WRITTEN TO sim2sim_diagnostics.log ---")
             

@@ -235,6 +235,45 @@ def main():
         with torch.inference_mode():
             # agent stepping
             actions = policy(obs)
+            
+            if timestep == 0:
+                import json
+                try:
+                    # Access the raw dictionary before it gets flattened or wrapped
+                    raw_obs = env.unwrapped.observation_manager._obs_buffer["policy"]
+                    
+                    if isinstance(raw_obs, dict):
+                        obs_np_dict = {k: v[0].cpu().numpy().tolist() for k, v in raw_obs.items()}
+                        obs_diag["isaac_joint_names"] = env.unwrapped.scene["robot"].data.joint_names
+                        obs_diag = {
+                            "tracker_obs_shape": sum(len(v) if isinstance(v, list) else 1 for v in obs_np_dict.values()),
+                            "action": actions[0].cpu().numpy().tolist(),
+                            "components": obs_np_dict
+                        }
+                    else:
+                        obs_np = raw_obs[0].cpu().numpy()
+                        obs_diag = {
+                            "tracker_obs_shape": len(obs_np),
+                            "action": actions[0].cpu().numpy().tolist(),
+                            "components": {
+                                "generated_command": obs_np[0:36].tolist(),
+                                "base_ang_vel_history": obs_np[36:51].tolist(),
+                                "joint_pos_history": obs_np[51:196].tolist(),
+                                "joint_vel_history": obs_np[196:341].tolist(),
+                                "actions_history": obs_np[341:486].tolist(),
+                                "project_gravity": obs_np[486:501].tolist(),
+                                "obj_pos_b": obs_np[501:504].tolist(),
+                                "obj_ori_b": obs_np[504:510].tolist()
+                            }
+                        }
+
+                    with open("isaaclab_diagnostics.log", "w") as f:
+                        f.write("--- FRAME 0 ISAACLAB DIAGNOSTICS ---\n")
+                        f.write(json.dumps(obs_diag, indent=2))
+                    print("--- FRAME 0 DIAGNOSTICS WRITTEN TO isaaclab_diagnostics.log ---")
+                except Exception as e:
+                    print(f"Failed to dump diagnostics: {e}")
+                
             # env stepping
             obs, _, _, _ = env.step(actions)
         if args_cli.video:
