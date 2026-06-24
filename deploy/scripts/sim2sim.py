@@ -499,13 +499,24 @@ def main():
             R_cv2m = np.array([
                 [1,  0,  0],
                 [0, -1,  0],
-                [0,  0, -1]
-            ])
+                [0,  0, -1]])
             p_tag_m = R_cv2m @ p_tag_cv
-            R_tag_m = R_cv2m @ R_tag_cv
+            R_box2cvtag = np.array([
+                [1,  0,  0],
+                [0, -1,  0],
+                [0,  0, -1]])
+            R_tag_m = R_cv2m @ R_tag_cv @ R_box2cvtag
             
             P_tag_world = P_cam_world + R_cam_world @ p_tag_m
             R_tag_world = R_cam_world @ R_tag_m
+            
+            # Temporary debug print
+            if getattr(get_pose_from_vision, 'print_counter', 0) % 50 == 0:
+                print(f"[Verbose Vision Debug] P_cam_world: {np.round(P_cam_world, 3)}")
+                print(f"                       p_tag_cv:    {np.round(p_tag_cv, 3)}")
+                print(f"                       P_tag_world: {np.round(P_tag_world, 3)}")
+            get_pose_from_vision.print_counter = getattr(get_pose_from_vision, 'print_counter', 0) + 1
+            
             return P_tag_world, R_tag_world
 
         def get_single_frame_gen_obs(last_cmd):

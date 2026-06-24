@@ -26,7 +26,7 @@ class VisionNode:
         self.dist_coeffs = np.zeros((4,1))
 
         # Tag size is 0.06m (since MuJoCo half-size is 0.03)
-        self.tag_size = 0.06
+        self.tag_size = 0.0465
         
         try:
             self.aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_APRILTAG_36h11)
@@ -47,13 +47,13 @@ class VisionNode:
 
     def estimate_pose(self, corners):
         obj_points = np.array([
-            [-self.tag_size/2,  self.tag_size/2, 0],
-            [ self.tag_size/2,  self.tag_size/2, 0],
+            [-self.tag_size/2, -self.tag_size/2, 0],
             [ self.tag_size/2, -self.tag_size/2, 0],
-            [-self.tag_size/2, -self.tag_size/2, 0]
+            [ self.tag_size/2,  self.tag_size/2, 0],
+            [-self.tag_size/2,  self.tag_size/2, 0]
         ], dtype=np.float32)
         
-        success, rvec, tvec = cv2.solvePnP(obj_points, corners[0], self.camera_matrix, self.dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+        success, rvec, tvec = cv2.solvePnP(obj_points, corners[0], self.camera_matrix, self.dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE)
         return rvec, tvec
 
     def rvec_to_quat(self, rvec):
