@@ -6,12 +6,43 @@ import pickle
 import time
 import numpy as np
 import torch
-import random
-import threading
 
-import threading
-import zmq
-import json
+import cv2
+from pupil_apriltags import Detector
+import math
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from geometry_msgs.msg import PoseStamped
+from cv_bridge import CvBridge
+
+class Sim2SimRosNode(Node):
+    def __init__(self):
+        super().__init__('sim2sim_ros2_node')
+        self.image_pub = self.create_publisher(Image, 'camera/color/image_raw', 10)
+        self.obj_pose_pub = self.create_publisher(PoseStamped, 'object_pose_torso', 10)
+        self.target_pose_pub = self.create_publisher(PoseStamped, 'target_pose_torso', 10)
+        self.bridge = CvBridge()
+
+    def publish_image(self, img_rgb):
+        msg = self.bridge.cv2_to_imgmsg(img_rgb, encoding="rgb8")
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "camera_frame"
+        self.image_pub.publish(msg)
+
+    def publish_pose(self, pub, pos, quat_wxyz):
+        msg = PoseStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "torso_link"
+        msg.pose.position.x = float(pos[0])
+        msg.pose.position.y = float(pos[1])
+        msg.pose.position.z = float(pos[2])
+        msg.pose.orientation.w = float(quat_wxyz[0])
+        msg.pose.orientation.x = float(quat_wxyz[1])
+        msg.pose.orientation.y = float(quat_wxyz[2])
+        msg.pose.orientation.z = float(quat_wxyz[3])
+        pub.publish(msg)
+
 
 # Configure sys.path to find local packages
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -54,6 +85,7 @@ ACTION_JOINT_ORDER = [
     "left_wrist_yaw_joint", "right_wrist_yaw_joint"
 ]
 JOINT_NAMES_29 = ACTION_JOINT_ORDER
+# 因为 IsaacLab 打印出来 Action 和 Obs 顺序完全一样，所以直接复用
 ACTION_JOINT_NAMES = ACTION_JOINT_ORDER 
 
 # Mappings from joint name to stiffness (Kp) and damping (Kd) constants
@@ -170,42 +202,6 @@ def matrix_to_quat(R):
         q_wxyz[1:] = q_xyzw[:3]
     return q_wxyz
 
-class ZmqVisionClient:
-    def __init__(self):
-        self.context = zmq.Context()
-        self.image_pub = self.context.socket(zmq.PUB)
-        self.image_pub.bind("tcp://127.0.0.1:5555")
-        
-        self.pose_sub = self.context.socket(zmq.SUB)
-        self.pose_sub.bind("tcp://127.0.0.1:5556")
-        self.pose_sub.setsockopt_string(zmq.SUBSCRIBE, "")
-        
-        self.obj_pose = None
-        self.tgt_pose = None
-        self.running = True
-        
-        self.thread = threading.Thread(target=self._recv_loop, daemon=True)
-        self.thread.start()
-
-    def _recv_loop(self):
-        while self.running:
-            try:
-                msg = self.pose_sub.recv_json()
-                if "tag_0" in msg:
-                    self.obj_pose = msg["tag_0"]
-                if "tag_1" in msg:
-                    self.tgt_pose = msg["tag_1"]
-            except Exception:
-                pass
-
-    def publish_image(self, rgb_image, time_ns=0):
-        md = dict(
-            dtype=str(rgb_image.dtype),
-            shape=rgb_image.shape,
-        )
-        self.image_pub.send_json(md, zmq.SNDMORE)
-        self.image_pub.send(rgb_image.tobytes())
-
 class TrackerPolicy:
     def __init__(self, model_path, device="cuda"):
         self.model_path = model_path
@@ -284,7 +280,6 @@ def load_reference_motion(task, motion_id):
     # Align lengths
     num_frames = min(robot_data["joint_pos"].shape[0], obj_data["obj_trans"].shape[0], contact_labels.shape[0])
     
-
     # Map the raw unsorted npz data (in JOINT_NAMES_29_UNSORTED order) to the alphabetically sorted JOINT_NAMES_29
     joint_pos_urdf = robot_data["joint_pos"][:num_frames, :29].astype(np.float32)
     joint_vel_urdf = robot_data["joint_vel"][:num_frames, :29].astype(np.float32)
@@ -320,14 +315,11 @@ def main():
     parser.add_argument("--control_dt", type=float, default=0.02, help="Control loop timestep (default: 0.02s)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device for policy running")
     parser.add_argument("--headless", action="store_true", help="Run simulation in headless mode (no passive viewer window)")
-    parser.add_argument("--use_vision", action="store_true", help="Use vision to get object and target pose")
-    args, unknown = parser.parse_known_args()
+    args = parser.parse_args()
 
     # Load reference motion data
     ref_data = load_reference_motion(args.task, args.motion_id)
     num_frames = ref_data["joint_pos"].shape[0] + 500
-    if args.use_vision:
-        num_frames = 9999999
 
     # Resolve default paths
     if args.tracker_model is None:
@@ -342,6 +334,25 @@ def main():
     print(f"[Policy] Running on device: {args.device}")
     tracker_policy = TrackerPolicy(args.tracker_model, device=args.device)
     
+
+    rclpy.init()
+    ros_node = Sim2SimRosNode()
+
+    # Setup Rendering
+    cam_name = "depth_camera"
+    cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, cam_name)
+    width, height = 640, 480
+    renderer = mujoco.Renderer(model, height=height, width=width)
+    fovy = model.cam_fovy[cam_id]
+    f = 0.5 * height / math.tan(fovy * math.pi / 360)
+    cam_params = [f, f, width / 2, height / 2]
+    detector = Detector(families='tag36h11')
+
+    latest_vision_obj_pos_b = np.array([0.3, 0.0, 0.1])
+    latest_vision_obj_ori_b = np.array([1.0, 0.0, 0.0, 0.0])
+    latest_vision_target_pos_b = np.array([0.3, 0.0, 0.0])
+    latest_vision_target_ori_b = np.array([1.0, 0.0, 0.0, 0.0])
+
     generator = None
     if args.mode == "full":
         from sugar_il.wrapper.sugar_il_wrapper import GeneratorWrapper, GeneratorObs
@@ -360,14 +371,6 @@ def main():
     model.opt.timestep = args.sim_dt
     decimation = int(round(args.control_dt / args.sim_dt))
     print(f"[MuJoCo] Timestep: {args.sim_dt}s. Control Frequency: {1.0/args.control_dt:.1f}Hz (decimation: {decimation} physics steps)")
-
-    if args.use_vision:
-        sim_node = ZmqVisionClient()
-        print("[Sim2Sim] Started ZmqVisionClient.")
-        renderer = mujoco.Renderer(model, 480, 640)
-    else:
-        sim_node = None
-        renderer = None
 
     # Retrieve Joint Mappings
     joint_qpos_indices = []
@@ -419,15 +422,8 @@ def main():
             
         data.qpos[box_qpos_adr:box_qpos_adr+3] = ref_data["obj_pos"][frame_idx]
         data.qpos[box_qpos_adr+3:box_qpos_adr+7] = ref_data["obj_quat"][frame_idx]
+        data.qvel[box_qvel_adr:box_qvel_adr+3] = ref_data["obj_lin_vel"][frame_idx]
         data.qvel[box_qvel_adr+3:box_qvel_adr+6] = ref_data["obj_ang_vel"][frame_idx]
-        
-        if args.use_vision and frame_idx == 0:
-            data.qpos[box_qpos_adr] += random.uniform(-0.1, 0.1)
-            data.qpos[box_qpos_adr+1] += random.uniform(-0.1, 0.1)
-            # Make the box upright so the tag stays on top, and place it stably on the ground
-            data.qpos[box_qpos_adr+2] = 0.175
-            data.qpos[box_qpos_adr+3:box_qpos_adr+7] = [1.0, 0.0, 0.0, 0.0]
-            data.qvel[box_qvel_adr:box_qvel_adr+6] = 0.0
         
         data.ctrl[:] = 0
         mujoco.mj_forward(model, data)
@@ -486,68 +482,20 @@ def main():
         }
         
         # Helper to compute single frame generator observation
-        def get_pose_from_vision(pose_dict):
-            cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "depth_camera")
-            P_cam_world = data.cam_xpos[cam_id]
-            R_cam_world = data.cam_xmat[cam_id].reshape(3, 3)
-            
-            p_tag_cv = np.array(pose_dict["pos"])
-            q_tag_cv = np.array(pose_dict["quat"])
-            R_tag_cv = Rotation.from_quat([q_tag_cv[1], q_tag_cv[2], q_tag_cv[3], q_tag_cv[0]]).as_matrix()
-            
-            # OpenCV (Z forward, Y down) to MuJoCo (Z backward, Y up)
-            R_cv2m = np.array([
-                [1,  0,  0],
-                [0, -1,  0],
-                [0,  0, -1]
-            ])
-            p_tag_m = R_cv2m @ p_tag_cv
-            R_tag_m = R_cv2m @ R_tag_cv
-            
-            P_tag_world = P_cam_world + R_cam_world @ p_tag_m
-            R_tag_world = R_cam_world @ R_tag_m
-            return P_tag_world, R_tag_world
-
         def get_single_frame_gen_obs(last_cmd):
-            p_obj = data.xpos[box_body_id]
             p_torso = data.xpos[torso_body_id]
             R_torso = data.xmat[torso_body_id].reshape(3, 3)
             
-            q_torso = np.zeros(4)
-            mujoco.mju_mat2Quat(q_torso, data.xmat[torso_body_id])
-            
-            if args.use_vision and sim_node.obj_pose is not None:
-                P_tag_world, R_tag_world = get_pose_from_vision(sim_node.obj_pose)
-                p_obj = P_tag_world - R_tag_world @ np.array([0, 0, 0.1755])
-                R_obj = R_tag_world
-                q_obj = np.zeros(4)
-                mujoco.mju_mat2Quat(q_obj, R_obj.flatten())
-            else:
-                q_obj = np.zeros(4)
-                mujoco.mju_mat2Quat(q_obj, data.xmat[box_body_id])
-
-            obj_pos_b_val = R_torso.T @ (p_obj - p_torso)
-            obj_ori_b_val = quat_mul(quat_inv(q_torso), q_obj)
+            obj_pos_b_val = latest_vision_obj_pos_b
+            obj_ori_b_val = latest_vision_obj_ori_b
             
             joint_pos_val = np.array([data.qpos[adr] for adr in joint_qpos_indices]) - q_default
             
             R_pelvis_val = data.xmat[pelvis_body_id].reshape(3, 3)
             project_gravity_val = R_pelvis_val.T @ np.array([0, 0, -1.0])
             
-            # Target is the last frame of reference motion
-            if args.use_vision and sim_node.tgt_pose is not None:
-                P_tgt_world, R_tgt_world = get_pose_from_vision(sim_node.tgt_pose)
-                # Tag is at 0.001 Z. Box center should be at Z=0.17
-                obj_target_pos_w = P_tgt_world + np.array([0, 0, 0.17 - 0.001])
-                r = Rotation.from_matrix(R_tgt_world)
-                q_xyzw = r.as_quat()
-                obj_target_quat_w = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]])
-            else:
-                obj_target_pos_w = ref_data["obj_pos"][-1]
-                obj_target_quat_w = ref_data["obj_quat"][-1]
-            
-            target_obj_pos_b_val = R_torso.T @ (obj_target_pos_w - p_torso)
-            target_obj_ori_b_val = quat_mul(quat_inv(q_torso), obj_target_quat_w)
+            target_obj_pos_b_val = latest_vision_target_pos_b
+            target_obj_ori_b_val = latest_vision_target_ori_b
             
             return {
                 'obj_pos_b': obj_pos_b_val,
@@ -568,7 +516,57 @@ def main():
     # Modular step function for simulation control loop
     def run_step(frame_idx, gen_cmd, gen_preds):
         nonlocal gen_history
+        nonlocal latest_vision_obj_pos_b, latest_vision_obj_ori_b, latest_vision_target_pos_b, latest_vision_target_ori_b
         
+        # --- Randomize box position slightly occasionally ---
+        if frame_idx > 0 and frame_idx % 200 == 0:
+            box_qpos_adr = model.joint("floating_box_base_joint").qposadr[0]
+            box_dof_adr = model.joint("floating_box_base_joint").dofadr[0]
+            data.qpos[box_qpos_adr] = 10.0 + np.random.uniform(-0.05, 0.05)
+            data.qpos[box_qpos_adr+1] = 10.0 + np.random.uniform(-0.05, 0.05)
+            data.qvel[box_dof_adr:box_dof_adr+6] = 0.0
+            print(f"[Sim2Sim] Box position randomized")
+
+        # --- Render and Vision ---
+        renderer.update_scene(data, camera=cam_name)
+        img_rgb = renderer.render()
+        ros_node.publish_image(img_rgb)
+        
+        img_gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+        detections = detector.detect(img_gray, estimate_tag_pose=True, camera_params=cam_params, tag_size=0.03)
+        
+        T_cv2mj = np.array([[0, 0, 1], [0, -1, 0], [1, 0, 0]], dtype=np.float32)
+        T_tag2obj = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=np.float32)
+        
+        cam_pos_w = data.cam_xpos[cam_id]
+        cam_mat_w = data.cam_xmat[cam_id].reshape(3, 3)
+        p_torso = data.xpos[torso_body_id]
+        R_torso = data.xmat[torso_body_id].reshape(3, 3)
+
+        for det in detections:
+            pos_mj = T_cv2mj @ det.pose_t.flatten()
+            rot_mj = T_cv2mj @ det.pose_R @ np.linalg.inv(T_tag2obj)
+            
+            tag_pos_w = cam_pos_w + cam_mat_w @ pos_mj
+            tag_rot_w = cam_mat_w @ rot_mj
+            
+            pos_b = R_torso.T @ (tag_pos_w - p_torso)
+            rot_b = R_torso.T @ tag_rot_w
+            quat_b = matrix_to_quat(rot_b)
+            
+            if det.tag_id == 0:
+                # Apply Z-offset to get center of object
+                pos_b[2] -= 0.175  # The tag is at Z=0.1755, subtract half-height to get object center
+                latest_vision_obj_pos_b = pos_b
+                latest_vision_obj_ori_b = quat_b
+                ros_node.publish_pose(ros_node.obj_pose_pub, latest_vision_obj_pos_b, latest_vision_obj_ori_b)
+            elif det.tag_id == 1:
+                latest_vision_target_pos_b = pos_b
+                latest_vision_target_ori_b = quat_b
+                ros_node.publish_pose(ros_node.target_pose_pub, latest_vision_target_pos_b, latest_vision_target_ori_b)
+        
+        rclpy.spin_once(ros_node, timeout_sec=0)
+
         # 1. Update State Variables
         R_pelvis = data.xmat[pelvis_body_id].reshape(3, 3)
         curr_base_ang_vel = data.qvel[3:6].copy()
@@ -579,37 +577,13 @@ def main():
         curr_joint_vel = v_actual
         curr_project_gravity = R_pelvis.T @ np.array([0, 0, -1.0])
         
-        # Object pose relative to Torso Link
-        p_obj = data.xpos[box_body_id]
-        p_torso = data.xpos[torso_body_id]
-        R_torso = data.xmat[torso_body_id].reshape(3, 3)
-        R_obj = data.xmat[box_body_id].reshape(3, 3)
+        obj_pos_b = latest_vision_obj_pos_b
         
-        if args.use_vision:
-            renderer.update_scene(data, camera="depth_camera")
-            rgb_image = renderer.render()
-            sim_node.publish_image(rgb_image, time.time_ns())
-            
-            if sim_node.obj_pose is not None:
-                P_tag_world, R_tag_world = get_pose_from_vision(sim_node.obj_pose)
-                p_obj = P_tag_world - R_tag_world @ np.array([0, 0, 0.1755])
-                R_obj = R_tag_world
-                
-                if frame_idx % 50 == 0:
-                    p_true = data.xpos[box_body_id]
-                    q_true = Rotation.from_matrix(data.xmat[box_body_id].reshape(3, 3)).as_quat()
-                    q_vis = Rotation.from_matrix(R_obj).as_quat()
-                    print(f"[Vision Debug] Box Pos True: {np.round(p_true, 3)}, Vis: {np.round(p_obj, 3)}")
-                    print(f"[Vision Debug] Box Quat True: {np.round(q_true, 3)}, Vis: {np.round(q_vis, 3)}")
-            
-            if sim_node.tgt_pose is not None and frame_idx % 50 == 0:
-                P_tgt_world, _ = get_pose_from_vision(sim_node.tgt_pose)
-                print(f"[Vision Debug] Target Pos True: [0.3 0.0 0.001], Vis: {np.round(P_tgt_world, 3)}")
+        # Extract 6D orientation from quaternion for Tracker
+        rot_matrix = Rotation.from_quat([latest_vision_obj_ori_b[1], latest_vision_obj_ori_b[2], latest_vision_obj_ori_b[3], latest_vision_obj_ori_b[0]]).as_matrix()
+        obj_ori_b = rot_matrix[:, :2].flatten()
+        p_obj = tag_pos_w if 'tag_pos_w' in locals() else data.xpos[box_body_id]
 
-        obj_pos_b = R_torso.T @ (p_obj - p_torso)
-        
-        R_obj_torso = R_torso.T @ R_obj
-        obj_ori_b = R_obj_torso[:, :2].flatten() # first 2 columns (6 elements)
 
         # 2. Update Tracker History queues
         base_ang_vel_hist.pop(0)
@@ -634,16 +608,15 @@ def main():
         # 3. Retrieve or Predict Command (36 dims)
         if args.mode == "tracker":
             # Tracker mode uses direct values from dataset
-            idx = min(frame_idx, ref_data["joint_pos_urdf"].shape[0] - 1)
-            ref_joint_pos_frame = ref_data["joint_pos_urdf"][idx]
+            ref_joint_pos_frame = ref_data["joint_pos_urdf"][frame_idx]
             
             # Get reference base orientation
-            q_ref_base = ref_data["robot_body_quat_w"][idx, 0]
+            q_ref_base = ref_data["robot_body_quat_w"][frame_idx, 0]
             # Rotate linear and angular velocities to local base frame
-            ref_root_lin_vel_b_frame = quat_apply_inverse(q_ref_base, ref_data["robot_body_lin_vel_w"][idx, 0])
-            ref_root_ang_vel_b_frame = quat_apply_inverse(q_ref_base, ref_data["robot_body_ang_vel_w"][idx, 0])
+            ref_root_lin_vel_b_frame = quat_apply_inverse(q_ref_base, ref_data["robot_body_lin_vel_w"][frame_idx, 0])
+            ref_root_ang_vel_b_frame = quat_apply_inverse(q_ref_base, ref_data["robot_body_ang_vel_w"][frame_idx, 0])
             
-            ref_contact_label_frame = np.array([ref_data["contact_label"][idx]], dtype=float)
+            ref_contact_label_frame = np.array([ref_data["contact_label"][frame_idx]], dtype=float)
             
             generated_command = np.concatenate([
                 ref_joint_pos_frame,
