@@ -18,7 +18,6 @@ import mujoco.viewer
 
 # Load G1 robot configurations
 from source.sugar_rl.sugar_rl.assets.robots.unitree_config import (
-    JOINT_NAMES_29,
     INIT_JOINT_POS,
     INIT_POS,
     UNITREE_G1_29DOF_MIMIC_ACTION_SCALE,
@@ -32,29 +31,25 @@ from source.sugar_rl.sugar_rl.assets.robots.unitree_config import (
     DAMPING_4010,
 )
 
-# Keep the original unsorted joint names to map raw reference data correctly
-JOINT_NAMES_29_UNSORTED = list(JOINT_NAMES_29)
-
-# MUST SORT! The policy's observation space uses alphabetically sorted joints.
-JOINT_NAMES_29 = sorted(JOINT_NAMES_29)
-
 # The order of joints output by the policy action (based on JointPositionActionCfg regex order)
-ACTION_JOINT_NAMES = [
-    # .*_hip_.*
-    "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint", "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
-    # .*_knee_.*
+ACTION_JOINT_ORDER = [
+    "left_hip_pitch_joint", "right_hip_pitch_joint", "waist_yaw_joint",
+    "left_hip_roll_joint", "right_hip_roll_joint", "waist_roll_joint",
+    "left_hip_yaw_joint", "right_hip_yaw_joint", "waist_pitch_joint",
     "left_knee_joint", "right_knee_joint",
-    # .*_ankle_.*
-    "left_ankle_pitch_joint", "left_ankle_roll_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
-    # waist_.*
-    "waist_pitch_joint", "waist_roll_joint", "waist_yaw_joint",
-    # .*_shoulder_.*
-    "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint", "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
-    # .*_elbow_.*
+    "left_shoulder_pitch_joint", "right_shoulder_pitch_joint",
+    "left_ankle_pitch_joint", "right_ankle_pitch_joint",
+    "left_shoulder_roll_joint", "right_shoulder_roll_joint",
+    "left_ankle_roll_joint", "right_ankle_roll_joint",
+    "left_shoulder_yaw_joint", "right_shoulder_yaw_joint",
     "left_elbow_joint", "right_elbow_joint",
-    # .*_wrist_.*
-    "left_wrist_pitch_joint", "left_wrist_roll_joint", "left_wrist_yaw_joint", "right_wrist_pitch_joint", "right_wrist_roll_joint", "right_wrist_yaw_joint"
+    "left_wrist_roll_joint", "right_wrist_roll_joint",
+    "left_wrist_pitch_joint", "right_wrist_pitch_joint",
+    "left_wrist_yaw_joint", "right_wrist_yaw_joint"
 ]
+JOINT_NAMES_29 = ACTION_JOINT_ORDER
+# 因为 IsaacLab 打印出来 Action 和 Obs 顺序完全一样，所以直接复用
+ACTION_JOINT_NAMES = ACTION_JOINT_ORDER 
 
 # Mappings from joint name to stiffness (Kp) and damping (Kd) constants
 JOINT_KP = {
@@ -226,6 +221,13 @@ def load_reference_motion(task, motion_id):
         
     print(f"[DataLoader] Loading reference trajectory from: {motion_dir}")
     robot_data = np.load(robot_path)
+    # # >>> 检查 npz 顺序 <<<
+    # print(f"\n=== NPZ DATA INSPECTION ===")
+    # print(f"Keys in npz: {robot_data.files}")
+    # print(f"joint_pos shape: {robot_data['joint_pos'].shape}")
+    # print(f"Frame 0 joint_pos values:\n{robot_data['joint_pos'][0]}")
+    # print("===========================\n")
+
     with open(obj_path, 'rb') as f:
         obj_data = pickle.load(f)
         
@@ -242,12 +244,8 @@ def load_reference_motion(task, motion_id):
     num_frames = min(robot_data["joint_pos"].shape[0], obj_data["obj_trans"].shape[0], contact_labels.shape[0])
     
     # Map the raw unsorted npz data (in JOINT_NAMES_29_UNSORTED order) to the alphabetically sorted JOINT_NAMES_29
-    joint_pos_urdf = np.zeros((num_frames, 29), dtype=np.float32)
-    joint_vel_urdf = np.zeros((num_frames, 29), dtype=np.float32)
-    for i, name in enumerate(JOINT_NAMES_29):
-        raw_idx = JOINT_NAMES_29_UNSORTED.index(name)
-        joint_pos_urdf[:, i] = robot_data["joint_pos"][:num_frames, raw_idx]
-        joint_vel_urdf[:, i] = robot_data["joint_vel"][:num_frames, raw_idx]
+    joint_pos_urdf = robot_data["joint_pos"][:num_frames, :29].astype(np.float32)
+    joint_vel_urdf = robot_data["joint_vel"][:num_frames, :29].astype(np.float32)
     
     ref_data = {
         "joint_pos": joint_pos_urdf,

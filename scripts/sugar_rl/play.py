@@ -164,7 +164,29 @@ def main():
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    # >>> 插入以下代码以打印真实的关节顺序 <<<
+    print("\n" + "="*60)
+    print("ISAACLAB TRUE JOINT ORDERS (CRITICAL FOR SIM2SIM)")
+    print("="*60)
+    robot = env.unwrapped.scene["robot"]
 
+    # 1. 观测空间的关节顺序 (通常是 URDF 物理顺序)
+    obs_joint_names = robot.data.joint_names
+    print("1. Observation Joint Names (Physical/URDF Order):")
+    for i, name in enumerate(obs_joint_names):
+        print(f"  [{i:2d}] {name}")
+
+    # 2. 动作空间的关节顺序 (正则展开后的真实顺序)
+    action_term = env.unwrapped.action_manager._terms.get("JointPositionAction")
+    if action_term:
+        action_joint_names = action_term._joint_names
+        print("\n2. Action Joint Names (Regex Expanded Order):")
+        for i, name in enumerate(action_joint_names):
+            print(f"  [{i:2d}] {name}")
+    else:
+        print("\n[WARNING] Could not find 'JointPositionAction' in action_manager._terms")
+    print("="*60 + "\n")
+    # >>> 插入结束 <<<
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
@@ -238,23 +260,90 @@ def main():
             
             if timestep == 0:
                 import json
+                import numpy as np
                 try:
-                    # Access the raw dictionary before it gets flattened or wrapped
+                    # 1) Dump frame 0 diagnostics (joint state)
+                    robot = env.unwrapped.scene["robot"]
+                    joint_names = robot.data.joint_names
+                    q_actual = robot.data.joint_pos[0].cpu().numpy()
+                    q_default = robot.data.default_joint_pos[0].cpu().numpy()
+                    
+                    try:
+                        q_target = robot.data.joint_pos_target[0].cpu().numpy()
+                    except AttributeError:
+                        q_target = np.zeros_like(q_actual)
+
+                    try:
+                        import sys
+                        sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "source", "sugar_rl")))
+                        from sugar_rl.assets.robots.unitree_config import (
+                            UNITREE_G1_29DOF_MIMIC_ACTION_SCALE, STIFFNESS_5020, STIFFNESS_7520_14, STIFFNESS_7520_22, STIFFNESS_4010,
+                            DAMPING_5020, DAMPING_7520_14, DAMPING_7520_22, DAMPING_4010
+                        )
+                        JOINT_KP = {
+                            "left_hip_pitch_joint": STIFFNESS_7520_14, "left_hip_roll_joint": STIFFNESS_7520_22, "left_hip_yaw_joint": STIFFNESS_7520_14, "left_knee_joint": STIFFNESS_7520_22, "left_ankle_pitch_joint": 2.0 * STIFFNESS_5020, "left_ankle_roll_joint": 2.0 * STIFFNESS_5020,
+                            "right_hip_pitch_joint": STIFFNESS_7520_14, "right_hip_roll_joint": STIFFNESS_7520_22, "right_hip_yaw_joint": STIFFNESS_7520_14, "right_knee_joint": STIFFNESS_7520_22, "right_ankle_pitch_joint": 2.0 * STIFFNESS_5020, "right_ankle_roll_joint": 2.0 * STIFFNESS_5020,
+                            "waist_yaw_joint": STIFFNESS_7520_14, "waist_roll_joint": 2.0 * STIFFNESS_5020, "waist_pitch_joint": 2.0 * STIFFNESS_5020,
+                            "left_shoulder_pitch_joint": STIFFNESS_5020, "left_shoulder_roll_joint": STIFFNESS_5020, "left_shoulder_yaw_joint": STIFFNESS_5020, "left_elbow_joint": STIFFNESS_5020, "left_wrist_roll_joint": STIFFNESS_5020, "left_wrist_pitch_joint": STIFFNESS_4010, "left_wrist_yaw_joint": STIFFNESS_4010,
+                            "right_shoulder_pitch_joint": STIFFNESS_5020, "right_shoulder_roll_joint": STIFFNESS_5020, "right_shoulder_yaw_joint": STIFFNESS_5020, "right_elbow_joint": STIFFNESS_5020, "right_wrist_roll_joint": STIFFNESS_5020, "right_wrist_pitch_joint": STIFFNESS_4010, "right_wrist_yaw_joint": STIFFNESS_4010,
+                        }
+                        JOINT_KD = {
+                            "left_hip_pitch_joint": DAMPING_7520_14, "left_hip_roll_joint": DAMPING_7520_22, "left_hip_yaw_joint": DAMPING_7520_14, "left_knee_joint": DAMPING_7520_22, "left_ankle_pitch_joint": 2.0 * DAMPING_5020, "left_ankle_roll_joint": 2.0 * DAMPING_5020,
+                            "right_hip_pitch_joint": DAMPING_7520_14, "right_hip_roll_joint": DAMPING_7520_22, "right_hip_yaw_joint": DAMPING_7520_14, "right_knee_joint": DAMPING_7520_22, "right_ankle_pitch_joint": 2.0 * DAMPING_5020, "right_ankle_roll_joint": 2.0 * DAMPING_5020,
+                            "waist_yaw_joint": DAMPING_7520_14, "waist_roll_joint": 2.0 * DAMPING_5020, "waist_pitch_joint": 2.0 * DAMPING_5020,
+                            "left_shoulder_pitch_joint": DAMPING_5020, "left_shoulder_roll_joint": DAMPING_5020, "left_shoulder_yaw_joint": DAMPING_5020, "left_elbow_joint": DAMPING_5020, "left_wrist_roll_joint": DAMPING_5020, "left_wrist_pitch_joint": DAMPING_4010, "left_wrist_yaw_joint": DAMPING_4010,
+                            "right_shoulder_pitch_joint": DAMPING_5020, "right_shoulder_roll_joint": DAMPING_5020, "right_shoulder_yaw_joint": DAMPING_5020, "right_elbow_joint": DAMPING_5020, "right_wrist_roll_joint": DAMPING_5020, "right_wrist_pitch_joint": DAMPING_4010, "right_wrist_yaw_joint": DAMPING_4010,
+                        }
+                    except Exception as e:
+                        print("Could not load unitree_config", e)
+                        UNITREE_G1_29DOF_MIMIC_ACTION_SCALE = {}
+                        JOINT_KP = {}
+                        JOINT_KD = {}
+
+                    MJ_IDS = {'left_ankle_pitch_joint': {'actuator_id': 4, 'qpos_adr': 11}, 'left_ankle_roll_joint': {'actuator_id': 5, 'qpos_adr': 12}, 'left_elbow_joint': {'actuator_id': 18, 'qpos_adr': 25}, 'left_hip_pitch_joint': {'actuator_id': 0, 'qpos_adr': 7}, 'left_hip_roll_joint': {'actuator_id': 1, 'qpos_adr': 8}, 'left_hip_yaw_joint': {'actuator_id': 2, 'qpos_adr': 9}, 'left_knee_joint': {'actuator_id': 3, 'qpos_adr': 10}, 'left_shoulder_pitch_joint': {'actuator_id': 15, 'qpos_adr': 22}, 'left_shoulder_roll_joint': {'actuator_id': 16, 'qpos_adr': 23}, 'left_shoulder_yaw_joint': {'actuator_id': 17, 'qpos_adr': 24}, 'left_wrist_pitch_joint': {'actuator_id': 20, 'qpos_adr': 27}, 'left_wrist_roll_joint': {'actuator_id': 19, 'qpos_adr': 26}, 'left_wrist_yaw_joint': {'actuator_id': 21, 'qpos_adr': 28}, 'right_ankle_pitch_joint': {'actuator_id': 10, 'qpos_adr': 17}, 'right_ankle_roll_joint': {'actuator_id': 11, 'qpos_adr': 18}, 'right_elbow_joint': {'actuator_id': 25, 'qpos_adr': 32}, 'right_hip_pitch_joint': {'actuator_id': 6, 'qpos_adr': 13}, 'right_hip_roll_joint': {'actuator_id': 7, 'qpos_adr': 14}, 'right_hip_yaw_joint': {'actuator_id': 8, 'qpos_adr': 15}, 'right_knee_joint': {'actuator_id': 9, 'qpos_adr': 16}, 'right_shoulder_pitch_joint': {'actuator_id': 22, 'qpos_adr': 29}, 'right_shoulder_roll_joint': {'actuator_id': 23, 'qpos_adr': 30}, 'right_shoulder_yaw_joint': {'actuator_id': 24, 'qpos_adr': 31}, 'right_wrist_pitch_joint': {'actuator_id': 27, 'qpos_adr': 34}, 'right_wrist_roll_joint': {'actuator_id': 26, 'qpos_adr': 33}, 'right_wrist_yaw_joint': {'actuator_id': 28, 'qpos_adr': 35}, 'waist_pitch_joint': {'actuator_id': 14, 'qpos_adr': 21}, 'waist_roll_joint': {'actuator_id': 13, 'qpos_adr': 20}, 'waist_yaw_joint': {'actuator_id': 12, 'qpos_adr': 19}}
+
+                    actions_np = actions[0].cpu().numpy()
+                    diag_log = []
+                    for i, name in enumerate(joint_names):
+                        act_idx = i
+                        raw_act = float(actions_np[act_idx]) if act_idx < len(actions_np) else 0.0
+                        scale_val = float(UNITREE_G1_29DOF_MIMIC_ACTION_SCALE.get(name, 1.0))
+                        kp_val = float(JOINT_KP.get(name, 0.0))
+                        kd_val = float(JOINT_KD.get(name, 0.0))
+                        
+                        joint_diag = {
+                            "name": name,
+                            "q_actual": float(q_actual[i]),
+                            "q_default": float(q_default[i]),
+                            "q_target": float(q_target[i]),
+                            "curr_joint_pos_rel": float(q_actual[i] - q_default[i]),
+                            "raw_action": raw_act,
+                            "action_urdf": raw_act,
+                            "action_scale": scale_val,
+                            "kp": kp_val,
+                            "kd": kd_val,
+                            "actuator_id": MJ_IDS.get(name, {}).get("actuator_id", -1),
+                            "qpos_adr": MJ_IDS.get(name, {}).get("qpos_adr", -1),
+                        }
+                        diag_log.append(joint_diag)
+
+                    with open("isaaclab_diagnostics.log", "w") as f:
+                        f.write("--- FRAME 0 DIAGNOSTICS ---\n")
+                        f.write(json.dumps(diag_log, indent=2))
+
+                    # 2) Dump frame 0 observation diagnostics
                     raw_obs = env.unwrapped.observation_manager._obs_buffer["policy"]
                     
                     if isinstance(raw_obs, dict):
                         obs_np_dict = {k: v[0].cpu().numpy().tolist() for k, v in raw_obs.items()}
-                        obs_diag["isaac_joint_names"] = env.unwrapped.scene["robot"].data.joint_names
                         obs_diag = {
-                            "tracker_obs_shape": sum(len(v) if isinstance(v, list) else 1 for v in obs_np_dict.values()),
-                            "action": actions[0].cpu().numpy().tolist(),
+                            "tracker_obs_shape": [sum(len(v) if isinstance(v, list) else 1 for v in obs_np_dict.values())],
                             "components": obs_np_dict
                         }
                     else:
                         obs_np = raw_obs[0].cpu().numpy()
                         obs_diag = {
-                            "tracker_obs_shape": len(obs_np),
-                            "action": actions[0].cpu().numpy().tolist(),
+                            "tracker_obs_shape": [len(obs_np)],
                             "components": {
                                 "generated_command": obs_np[0:36].tolist(),
                                 "base_ang_vel_history": obs_np[36:51].tolist(),
@@ -267,8 +356,8 @@ def main():
                             }
                         }
 
-                    with open("isaaclab_diagnostics.log", "w") as f:
-                        f.write("--- FRAME 0 ISAACLAB DIAGNOSTICS ---\n")
+                    with open("isaaclab_diagnostics.log", "a") as f:
+                        f.write("\n\n--- FRAME 0 TRACKER OBSERVATION DIAGNOSTICS ---\n")
                         f.write(json.dumps(obs_diag, indent=2))
                     print("--- FRAME 0 DIAGNOSTICS WRITTEN TO isaaclab_diagnostics.log ---")
                 except Exception as e:
