@@ -26,7 +26,7 @@ class VisionNode:
         self.dist_coeffs = np.zeros((4,1))
 
         # Tag size is 0.06m (since MuJoCo half-size is 0.03)
-        self.tag_size = 0.0465
+        self.tag_size = 0.045
         
         try:
             self.aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_APRILTAG_36h11)

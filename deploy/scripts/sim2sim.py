@@ -502,8 +502,8 @@ def main():
                 [0,  0, -1]])
             p_tag_m = R_cv2m @ p_tag_cv
             R_box2cvtag = np.array([
-                [1,  0,  0],
-                [0, -1,  0],
+                [-1,  0,  0],
+                [0, 1,  0],
                 [0,  0, -1]])
             R_tag_m = R_cv2m @ R_tag_cv @ R_box2cvtag
             
@@ -610,8 +610,8 @@ def main():
                     p_true = data.xpos[box_body_id]
                     q_true = Rotation.from_matrix(data.xmat[box_body_id].reshape(3, 3)).as_quat()
                     q_vis = Rotation.from_matrix(R_obj).as_quat()
-                    print(f"[Vision Debug] Box Pos True: {np.round(p_true, 3)}, Vis: {np.round(p_obj, 3)}")
-                    print(f"[Vision Debug] Box Quat True: {np.round(q_true, 3)}, Vis: {np.round(q_vis, 3)}")
+                    print(f"[Vision Debug] Box Pos True: {np.round(p_true, 3)}, Vis: {np.round(p_obj, 3)}, Error: {np.round(p_true-p_obj, 3)}")
+                    print(f"[Vision Debug] Box Quat True: {np.round(q_true, 3)}, Vis: {np.round(q_vis, 3)}, Error: {np.round(q_true-q_vis,3)}")
             
             if sim_node.tgt_pose is not None and frame_idx % 50 == 0:
                 P_tgt_world, _ = get_pose_from_vision(sim_node.tgt_pose)
